@@ -1,13 +1,12 @@
+import re
 import pandas as pd
 import io
-import json
-import os
-from typing import Dict, List, Union, Tuple, Optional
-import csv
-import PyPDF2
-from docx import Document
-import base64
-from tabulate import tabulate
+from typing import Tuple, Optional, List
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def process_document(file, file_type: str) -> Tuple[str, Optional[pd.DataFrame]]:
     """
@@ -20,88 +19,92 @@ def process_document(file, file_type: str) -> Tuple[str, Optional[pd.DataFrame]]
     Returns:
         Tuple[str, Optional[pd.DataFrame]]: Tuple containing extracted text content and dataframe (if applicable)
     """
-    content = ""
-    df = None
-    
     try:
-        # Handle different file types
-        if file_type in ['.csv', '.tsv']:
-            # CSV/TSV files
-            delimiter = ',' if file_type == '.csv' else '\t'
-            df = pd.read_csv(file, delimiter=delimiter)
-            # Create a string representation
-            content = f"Document type: {file_type[1:].upper()}\n\n"
-            content += f"Rows: {len(df)}, Columns: {len(df.columns)}\n"
+        # CSV or TSV processing
+        if file_type.lower() in ['.csv', '.tsv']:
+            sep = ',' if file_type.lower() == '.csv' else '\t'
+            df = pd.read_csv(file, sep=sep)
+            
+            # Get a string representation for the AI
+            content = f"This is a {file_type[1:].upper()} file with {len(df)} rows and {len(df.columns)} columns.\n\n"
             content += f"Column names: {', '.join(df.columns.tolist())}\n\n"
-            # Add full tabular content
-            content += tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
-        
-        elif file_type == '.xlsx':
-            # Excel files
-            # Read all sheets
-            xlsx = pd.ExcelFile(file, engine='openpyxl')
-            sheet_names = xlsx.sheet_names
-            content = f"Document type: Excel\n\n"
-            content += f"Total sheets: {len(sheet_names)}\n"
-            content += f"Sheet names: {', '.join(sheet_names)}\n\n"
             
-            # Process each sheet
-            for sheet_name in sheet_names:
-                df_sheet = pd.read_excel(file, engine='openpyxl', sheet_name=sheet_name)
-                content += f"=== SHEET: {sheet_name} ===\n"
-                content += f"Rows: {len(df_sheet)}, Columns: {len(df_sheet.columns)}\n"
-                content += f"Column names: {', '.join(df_sheet.columns.tolist())}\n\n"
-                # Add full tabular content
-                content += tabulate(df_sheet, headers='keys', tablefmt='pipe', showindex=False)
-                content += "\n\n"
+            # Add sample data (first few rows)
+            sample_size = min(5, len(df))
+            if sample_size > 0:
+                content += f"First {sample_size} rows:\n"
+                content += convert_df_to_csv_string(df.head(sample_size))
                 
-            # Use the first sheet as the default DataFrame
-            df = pd.read_excel(file, engine='openpyxl', sheet_name=0)
+            return content, df
             
-        elif file_type == '.pdf':
-            # PDF files
-            reader = PyPDF2.PdfReader(file)
-            content = f"Document type: PDF\n\n"
-            content += f"Total pages: {len(reader.pages)}\n\n"
+        # Excel processing
+        elif file_type.lower() == '.xlsx':
+            df = pd.read_excel(file)
             
-            # Extract text from all pages
-            for i in range(len(reader.pages)):
-                page_content = reader.pages[i].extract_text()
-                content += f"--- Page {i+1} ---\n{page_content}\n\n"
+            # Get a string representation for the AI
+            content = f"This is an Excel file with {len(df)} rows and {len(df.columns)} columns.\n\n"
+            content += f"Column names: {', '.join(df.columns.tolist())}\n\n"
+            
+            # Add sample data (first few rows)
+            sample_size = min(5, len(df))
+            if sample_size > 0:
+                content += f"First {sample_size} rows:\n"
+                content += convert_df_to_csv_string(df.head(sample_size))
                 
-        elif file_type == '.txt':
-            # Text files
-            content = f"Document type: Text file\n\n"
-            text_content = file.read().decode('utf-8')
-            # Include the full content without truncation
-            content += text_content
+            return content, df
+            
+        # PDF processing
+        elif file_type.lower() == '.pdf':
+            try:
+                # Try to use PyPDF2 for PDF extraction
+                from PyPDF2 import PdfReader
                 
-        elif file_type == '.docx':
-            # Word documents
-            doc = Document(file)
-            content = f"Document type: Word Document\n\n"
+                bytes_data = file.getvalue()
+                reader = PdfReader(io.BytesIO(bytes_data))
+                
+                content = ""
+                for page_num in range(len(reader.pages)):
+                    page = reader.pages[page_num]
+                    content += page.extract_text() + "\n\n"
+                    
+                if not content.strip():
+                    content = "The PDF appears to contain no extractable text content. It might be scanned or image-based."
+                
+                return content, None
+                
+            except Exception as e:
+                logger.error(f"Error extracting PDF content: {str(e)}")
+                return f"Error processing PDF: {str(e)}", None
+                
+        # Plain text processing
+        elif file_type.lower() == '.txt':
+            content = file.getvalue().decode('utf-8')
+            return content, None
             
-            # Extract all paragraphs
-            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-            content += "\n\n".join(paragraphs)
-            
-            # Include all tables if present
-            if doc.tables:
-                content += "\n\n=== TABLES ===\n\n"
-                for i, table in enumerate(doc.tables):
-                    content += f"--- Table {i+1} ---\n"
-                    for row in table.rows:
-                        row_content = [cell.text for cell in row.cells]
-                        content += " | ".join(row_content) + "\n"
-                    content += "\n"
+        # Word document processing
+        elif file_type.lower() in ['.docx', '.doc']:
+            try:
+                from docx import Document
+                
+                bytes_data = file.getvalue()
+                doc = Document(io.BytesIO(bytes_data))
+                
+                content = ""
+                for paragraph in doc.paragraphs:
+                    content += paragraph.text + "\n"
+                    
+                return content, None
+                
+            except Exception as e:
+                logger.error(f"Error extracting Word document content: {str(e)}")
+                return f"Error processing Word document: {str(e)}", None
                 
         else:
-            content = f"Unsupported file type: {file_type}"
+            return f"Unsupported file type: {file_type}", None
             
-        return content, df
-    
     except Exception as e:
-        return f"Error processing {file_type} file: {str(e)}", None
+        logger.error(f"Error processing document: {str(e)}")
+        return f"Error processing document: {str(e)}", None
 
 def get_file_extension(filename: str) -> str:
     """
@@ -113,8 +116,9 @@ def get_file_extension(filename: str) -> str:
     Returns:
         str: Lowercase file extension with dot
     """
-    _, extension = os.path.splitext(filename)
-    return extension.lower()
+    pattern = r'(\.[a-zA-Z0-9]+)$'
+    match = re.search(pattern, filename.lower())
+    return match.group(1) if match else ''
 
 def convert_df_to_csv_string(df: pd.DataFrame) -> str:
     """
@@ -126,12 +130,7 @@ def convert_df_to_csv_string(df: pd.DataFrame) -> str:
     Returns:
         str: CSV string representation
     """
-    if df is None:
-        return ""
-    
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    return csv_buffer.getvalue()
+    return df.to_csv(index=False)
 
 def convert_df_to_json_string(df: pd.DataFrame) -> str:
     """
@@ -143,10 +142,7 @@ def convert_df_to_json_string(df: pd.DataFrame) -> str:
     Returns:
         str: JSON string representation
     """
-    if df is None:
-        return ""
-    
-    return df.to_json(orient='records')
+    return df.to_json(orient='records', indent=2)
 
 def get_document_summary(document_content: str) -> str:
     """
@@ -158,28 +154,28 @@ def get_document_summary(document_content: str) -> str:
     Returns:
         str: A brief summary
     """
-    # Extract document type from content
-    doc_type = "Unknown"
-    if document_content.startswith("Document type:"):
-        doc_type_line = document_content.split('\n')[0]
-        doc_type = doc_type_line.replace("Document type:", "").strip()
-    
-    # Get a length-based summary
-    content_length = len(document_content)
+    if not document_content:
+        return "No content available to summarize."
+        
+    # Get the document size in words and characters
     words = document_content.split()
     word_count = len(words)
+    char_count = len(document_content)
     
-    # Create summary
-    summary = f"{doc_type} document with approximately {word_count} words"
+    # Extract the beginning of the document (first few sentences)
+    sentences = document_content.split('.')
+    first_sentences = '.'.join(sentences[:3]) + '.'
     
-    # Add additional info based on document type
-    if "Rows:" in document_content and "Columns:" in document_content:
-        # For tabular data
-        info_line = [line for line in document_content.split('\n') if "Rows:" in line][0]
-        summary += f" ({info_line.strip()})"
-    elif "Total pages:" in document_content:
-        # For PDFs
-        info_line = [line for line in document_content.split('\n') if "Total pages:" in line][0]
-        summary += f" ({info_line.strip()})"
+    # Create a brief summary
+    summary = f"Document with {word_count} words ({char_count} characters).\n\n"
+    summary += f"Beginning: {first_sentences}\n\n"
+    
+    # Add structure information if it's a structured document
+    if "Column names:" in document_content and "rows:" in document_content:
+        # Extract column names
+        match = re.search(r"Column names: ([^\n]+)", document_content)
+        if match:
+            columns = match.group(1)
+            summary += f"Contains a table with columns: {columns}\n"
     
     return summary
