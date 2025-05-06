@@ -20,7 +20,14 @@ if "agent" not in st.session_state:
     st.session_state.agent = Agent()
     
 if "vector_store" not in st.session_state:
-    st.session_state.vector_store = initialize_vector_store()
+    # Pass the selected model version to initialize_vector_store
+    model_version = None
+    if "selected_model" in st.session_state and "gemini_model_version" in st.session_state and "openai_model_version" in st.session_state:
+        if st.session_state.selected_model == "gemini":
+            model_version = st.session_state.gemini_model_version
+        else:
+            model_version = st.session_state.openai_model_version
+    st.session_state.vector_store = initialize_vector_store(model_version)
     
 if "conversation_id" not in st.session_state:
     # Get or create default user
@@ -122,7 +129,14 @@ with st.sidebar:
         )
         
         # Update the session state with the selection
-        st.session_state.gemini_model_version = selected_gemini_model
+        if selected_gemini_model != st.session_state.gemini_model_version:
+            # Update the session state with the selection
+            st.session_state.gemini_model_version = selected_gemini_model
+            
+            # Reinitialize vector store with the new model version if API key is available
+            if st.session_state.get("google_api_key"):
+                st.session_state.vector_store = initialize_vector_store(selected_gemini_model)
+
         
         # Initialize API key in session state if not already there
         if "google_api_key" not in st.session_state:
@@ -195,8 +209,15 @@ with st.sidebar:
         )
         
         # Update the session state with the selection
-        st.session_state.openai_model_version = selected_openai_model
-        
+        # For OpenAI model switching
+        if selected_openai_model != st.session_state.openai_model_version:
+            # Update the session state with the selection
+            st.session_state.openai_model_version = selected_openai_model
+            
+            # Reinitialize vector store with the new model version if API key is available
+            if st.session_state.get("openai_api_key"):
+                st.session_state.vector_store = initialize_vector_store(selected_openai_model)
+                
         # Initialize OpenAI API key in session state if not already there
         if "openai_api_key" not in st.session_state:
             st.session_state.openai_api_key = ""
