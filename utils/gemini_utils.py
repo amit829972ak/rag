@@ -1,8 +1,7 @@
 import os
+import io
 import base64
-import json
-from io import BytesIO
-import logging
+from PIL import Image
 import google.generativeai as genai
 
 # Gemini model options with expanded set of models
@@ -58,8 +57,8 @@ GEMINI_MODELS = {
         "api_name": "gemini-2.5-flash"
     }
 }
-# Set the default model
-DEFAULT_TEXT_MODEL = "gemini-1.0-pro"
+
+# Models for specific capabilities
 GEMINI_VISION_MODELS = [
     "gemini-1.0-pro-vision", 
     "gemini-1.5-pro", 
@@ -71,6 +70,11 @@ GEMINI_VISION_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.5-flash"
 ]
+GEMINI_EMBEDDING_MODEL = "models/embedding-001"
+
+# Default models
+DEFAULT_TEXT_MODEL = "gemini-1.0-pro"  # For text-only queries (free tier capable)
+DEFAULT_VISION_MODEL = "gemini-1.0-pro-vision"  # For queries with images (free tier capable)
 
 def get_gemini_client(api_key=None):
     """
@@ -85,21 +89,30 @@ def get_gemini_client(api_key=None):
     Raises:
         Exception: If API key is invalid or missing
     """
+    # Require API key - no fallback to environment variable
+    if not api_key:
+        raise Exception("No API key provided. Please provide a Google Gemini API key.")
+    
+    key = api_key
+    
+    # Configure the Gemini API but avoid test API calls during validation
     try:
-        # Check for API key in parameters or environment variables
-        api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+        # Only configure the API without making test calls
+        genai.configure(api_key=key)
         
-        if not api_key:
-            logging.warning("No Google API key provided. Some features may not work.")
-            return False
+        # Simple format validation (API keys are usually ~40+ characters)
+        if len(key) < 20:
+            raise Exception("API key appears to be too short. Google Gemini API keys are typically longer.")
         
-        # Configure the Gemini API with the provided key
-        genai.configure(api_key=api_key)
-        return True
     except Exception as e:
-        logging.error(f"Error configuring Gemini API: {str(e)}")
-        return False
-
+        error_msg = str(e).lower()
+        if "invalid" in error_msg and "api" in error_msg:
+            raise Exception("Invalid API key. Please check your Google Gemini API key and try again.")
+        elif "rate" in error_msg or "quota" in error_msg or "limit" in error_msg:
+            raise Exception("API rate limit reached. Please try again later or use a different API key.")
+        else:
+            raise Exception(f"Error configuring Gemini API: {str(e)}")
+    
 def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, model_version=None):
     """
     Get a response from the Google Gemini API.
@@ -109,7 +122,7 @@ def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, mode
         system_prompt (str, optional): System instructions to guide the AI.
         context (list, optional): Previous conversation context.
         api_key (str, optional): Google Gemini API key.
-        model_version (str, optional): The specific model version to use.
+        model_version (str, optional): The specific Gemini model to use.
         
     Returns:
         str: The AI's response.
@@ -118,73 +131,46 @@ def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, mode
         Exception: If there's an API error
     """
     try:
-        # Configure the client if needed
-        client_configured = get_gemini_client(api_key)
+        # Configure the client
+        get_gemini_client(api_key)
         
-        if not client_configured:
-            return "⚠️ Unable to generate a response: Missing or invalid Google API key. Please provide a valid API key in the sidebar."
+        # Use the specified model or the default
+        selected_model = model_version if model_version and model_version in GEMINI_MODELS else DEFAULT_TEXT_MODEL
         
-        # Get the appropriate model
-        if not model_version or model_version not in GEMINI_MODELS:
-            model_version = DEFAULT_TEXT_MODEL
-            
-        model_name = GEMINI_MODELS[model_version]["api_name"]
+        # Get the API name for the selected model
+        model_name = GEMINI_MODELS[selected_model]["api_name"]
         
-        # Create a GenerativeModel object
+        # Create the model
         model = genai.GenerativeModel(model_name)
         
-        # Prepare the chat session
+        # Prepare conversation history if available
+        chat_history = []
         if context:
-            chat = model.start_chat(history=context)
-            response = chat.send_message(prompt)
-        else:
-            # For a single prompt without context
-            generation_config = {
-                "temperature": 0.7,
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 2048,
-            }
-            
-            safety_settings = [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                }
-            ]
-            
-            # Construct the full prompt with system instruction if provided
-            full_prompt = prompt
-            if system_prompt:
-                full_prompt = f"{system_prompt}\n\n{prompt}"
-            
-            response = model.generate_content(
-                full_prompt,
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
-            
-        # Extract and return the text response
-        if hasattr(response, 'text'):
-            return response.text
-        else:
-            return response.candidates[0].content.parts[0].text
-            
+            for message in context:
+                role = "user" if message["role"] == "user" else "model"
+                chat_history.append({"role": role, "parts": [message["content"]]})
+        
+        # Start a chat session
+        chat = model.start_chat(history=chat_history if chat_history else None)
+        
+        # Add system prompt as an initial instruction if provided
+        if system_prompt:
+            # For Gemini, system prompts are part of the user message
+            prompt = f"{system_prompt}\n\nUser query: {prompt}"
+        
+        # Send the message and get the response
+        response = chat.send_message(prompt)
+        
+        return response.text
+    
     except Exception as e:
-        logging.error(f"Error calling Gemini API: {str(e)}")
-        return f"⚠️ Unable to generate a response: {str(e)}\n\nPlease check your API key and try again."
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid Google API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            raise Exception(f"Google API quota or rate limit reached: {error_msg}")
+        else:
+            raise Exception(f"Error generating response: {error_msg}")
 
 def encode_image_to_base64(image):
     """
@@ -196,11 +182,9 @@ def encode_image_to_base64(image):
     Returns:
         str: Base64-encoded image string.
     """
-    buffer = BytesIO()
-    image.save(buffer, format="JPEG")
-    image_bytes = buffer.getvalue()
-    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-    return encoded_image
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def analyze_image_content(image, api_key=None, model_version=None):
     """
@@ -209,89 +193,92 @@ def analyze_image_content(image, api_key=None, model_version=None):
     Args:
         image (PIL.Image): The image to analyze.
         api_key (str, optional): Google Gemini API key.
-        model_version (str, optional): The specific model version to use.
+        model_version (str, optional): The specific Gemini model to use.
         
     Returns:
         str: Analysis of the image content.
     """
     try:
-        # Configure the client if needed
-        client_configured = get_gemini_client(api_key)
+        # Configure the client
+        get_gemini_client(api_key)
         
-        if not client_configured:
-            return "⚠️ Unable to analyze image: Missing or invalid Google API key. Please provide a valid API key in the sidebar."
+        # Use a vision-capable model
+        # If the selected model supports vision, use it; otherwise use the default vision model
+        selected_model = DEFAULT_VISION_MODEL  # Default vision-capable model
         
-        # Get the appropriate model for vision tasks
-        vision_model = "gemini-pro-vision"  # Default vision model
+        # If a specific model was requested and it's in our vision models list, use it
+        if model_version and model_version in GEMINI_VISION_MODELS:
+            selected_model = model_version
         
-        # Create a GenerativeModel object
+        # Ensure we have a string value
+        selected_model = selected_model if selected_model else DEFAULT_VISION_MODEL
+        
+        # Get the API name for the selected model
+        if selected_model in GEMINI_MODELS:
+            vision_model = GEMINI_MODELS[selected_model]["api_name"]
+        else:
+            # Fallback to the default vision model's API name
+            vision_model = "gemini-pro-vision"
+            
+        # Create the vision model
         model = genai.GenerativeModel(vision_model)
         
-        # Prepare the prompt for image analysis
-        prompt = """
-        Analyze this image and describe what you see in detail. 
-        Include:
-        1. Main subjects or objects
-        2. Actions or activities shown
-        3. Setting or background
-        4. Any text visible in the image
-        5. Notable details that might be relevant
+        # Convert image to bytes for Gemini
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        image_bytes = buffered.getvalue()
         
-        Provide a thorough and objective description without making assumptions beyond what is clearly visible.
-        """
+        # Create a structured prompt with image
+        prompt = "Analyze this image in detail. Describe what you see and provide any relevant information about the content."
         
-        # Create the request with the image
-        image_data = BytesIO()
-        image.save(image_data, format="JPEG")
-        image_data = image_data.getvalue()
+        # Send the prompt with the image
+        response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_bytes}])
         
-        response = model.generate_content([prompt, image_data])
-        
-        # Extract and return the text response
-        if hasattr(response, 'text'):
-            return response.text
-        else:
-            return response.candidates[0].content.parts[0].text
-            
+        return response.text
+    
     except Exception as e:
-        logging.error(f"Error analyzing image with Gemini: {str(e)}")
-        return f"⚠️ Unable to analyze image: {str(e)}\n\nPlease check your API key and try again."
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid Google API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            raise Exception(f"Google API quota or rate limit reached: {error_msg}")
+        elif "content" in error_msg.lower() and ("policy" in error_msg.lower() or "filter" in error_msg.lower()):
+            raise Exception("The image appears to contain content that violates Google's content policy. Please try a different image.")
+        else:
+            raise Exception(f"Error analyzing image: {error_msg}")
 
-def get_embedding(text, api_key=None):
+def get_embedding(text, api_key=None, model_version=None):
     """
     Get an embedding vector for the given text using Google's embedding model.
     
     Args:
         text (str): The text to embed.
         api_key (str, optional): Google API key.
+        model_version (str, optional): Not used for embeddings, but included for API consistency.
         
     Returns:
         list: The embedding vector.
     """
     try:
-        # Configure the client if needed
-        client_configured = get_gemini_client(api_key)
+        # Configure the client
+        get_gemini_client(api_key)
         
-        if not client_configured:
-            logging.warning("Missing Google API key for embedding generation.")
-            return None
-            
-        # Use Google's embedding model
-        embedding_model = "embedding-001"
-        
-        # Get the embedding
-        embedding = genai.embed_content(
+        # Create the embedding model
+        embedding_model = "models/embedding-001"
+        result = genai.embed_content(
             model=embedding_model,
             content=text,
-            task_type="retrieval_document"
+            task_type="retrieval_query"
         )
         
         # Return the embedding values
-        if hasattr(embedding, "embedding"):
-            return embedding.embedding
-        else:
-            return embedding.embedding_values
-            
+        return result["embedding"]
+    
     except Exception as e:
-        logging.error(f"Error generating embedding with Google API: {str(e)}")
-        return None
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid Google API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            raise Exception(f"Google API embedding generation rate limit reached: {error_msg}")
+        else:
+            raise Exception(f"Error generating embedding: {error_msg}")
