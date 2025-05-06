@@ -1,10 +1,11 @@
-import logging
-from utils.gemini_utils import get_ai_response as gemini_get_response, analyze_image_content as gemini_analyze_image
-from utils.openai_utils import get_ai_response as openai_get_response, analyze_image_content as openai_analyze_image
-from utils.db_utils import get_conversation_messages, add_message_to_db
+import time
+from utils.db_utils import add_message_to_db, get_conversation_messages
+from utils.gemini_utils import get_ai_response as gemini_get_response, analyze_image_content as gemini_analyze_image, get_embedding as gemini_get_embedding
+from utils.openai_utils import get_ai_response as openai_get_response, analyze_image_content as openai_analyze_image, get_embedding as openai_get_embedding
+from utils.gemini_langchain_utils import get_rag_response as gemini_get_rag_response, get_multimodal_response as gemini_get_multimodal_response
+from utils.langchain_utils import get_rag_response as openai_get_rag_response, get_multimodal_response as openai_get_multimodal_response
 from utils.vector_store import search_vector_store
-from utils.gemini_utils import get_embedding as gemini_get_embedding
-from utils.openai_utils import get_embedding as openai_get_embedding
+from utils.document_utils import get_document_summary
 
 class Agent:
     """
@@ -14,15 +15,14 @@ class Agent:
     def __init__(self):
         """Initialize the Agent with default values."""
         self.conversation_id = None
-        self.model_name = "gemini"  # Default model
+        self.last_message_id = None
+        self.selected_model = "gemini"  # default model
+        self.model_version = None  # specific version of the model (e.g., "gpt-4o" or "gemini-1.0-pro")
         self.api_key = None
-        self.model_version = None
-        self.history = []
-        
+    
     def set_conversation_id(self, conversation_id):
         """Set the conversation ID for this agent instance."""
         self.conversation_id = conversation_id
-        self.load_history_from_db()
         
     def set_model(self, model_name, api_key=None, model_version=None):
         """
@@ -33,10 +33,10 @@ class Agent:
             api_key (str, optional): API key for the selected model
             model_version (str, optional): Specific version of the model to use
         """
-        self.model_name = model_name
+        self.selected_model = model_name
         self.api_key = api_key
         self.model_version = model_version
-        
+    
     def get_conversation_history(self, limit=20):
         """
         Get the conversation history.
@@ -49,9 +49,9 @@ class Agent:
         """
         if not self.conversation_id:
             return []
-            
-        return get_conversation_messages(self.conversation_id, limit)
         
+        return get_conversation_messages(self.conversation_id, limit)
+    
     def get_chatbot_format_history(self, history=None):
         """
         Format the conversation history for Streamlit chat display.
@@ -64,30 +64,20 @@ class Agent:
         """
         if history is None:
             history = self.get_conversation_history()
+        
+        # Format for Streamlit chat
+        formatted_messages = []
+        
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "assistant"
+                content = msg["content"]
+                
+                # Add the message content
+                formatted_messages.append((role, content))
             
-        chat_history = []
-        for msg in history:
-            role = msg.role
-            content = msg.content
-            chat_history.append((role, content))
-            
-        return chat_history
+        return formatted_messages
     
-    def load_history_from_db(self):
-        """Load conversation history from the database."""
-        self.history = self.get_conversation_history()
-        
-    def add_to_history(self, role, content):
-        """
-        Add a message to the conversation history and database.
-        
-        Args:
-            role (str): The role of the message sender ('user' or 'assistant')
-            content (str): The message content
-        """
-        if self.conversation_id:
-            add_message_to_db(self.conversation_id, role, content)
-            
     def process_query(self, query, vector_store=None, image=None, document_content=None):
         """
         Process a user query and get an AI response.
@@ -101,97 +91,95 @@ class Agent:
         Returns:
             str: The AI's response
         """
+        # Check for API key first
+        if not self.api_key:
+            api_key_missing_message = f"Please enter a valid API key for the {self.selected_model.capitalize()} model in the sidebar settings. You need an API key to interact with the AI models."
+            # Save messages to DB for continuity
+            add_message_to_db(self.conversation_id, "user", query)
+            add_message_to_db(self.conversation_id, "assistant", api_key_missing_message)
+            return api_key_missing_message
+            
+        # Save user message to DB
+        add_message_to_db(self.conversation_id, "user", query)
+        
+        # Determine which model's functions to use
+        if self.selected_model == "gemini":
+            get_response = gemini_get_response
+            analyze_image = gemini_analyze_image
+            get_embedding = gemini_get_embedding
+            get_rag_response = gemini_get_rag_response
+            get_multimodal_response = gemini_get_multimodal_response
+        else:  # OpenAI
+            get_response = openai_get_response
+            analyze_image = openai_analyze_image
+            get_embedding = openai_get_embedding
+            get_rag_response = openai_get_rag_response
+            get_multimodal_response = openai_get_multimodal_response
+        
         try:
-            # Add user query to conversation history
-            self.add_to_history('user', query)
+            # Handle different query types based on context
+            response_text = ""
             
-            # Determine which model functions to use
-            get_response = gemini_get_response if self.model_name == "gemini" else openai_get_response
-            analyze_image = gemini_analyze_image if self.model_name == "gemini" else openai_analyze_image
-            get_embedding = gemini_get_embedding if self.model_name == "gemini" else openai_get_embedding
-            
-            # Variables to store additional context for the prompt
-            image_analysis = None
-            relevant_information = None
-            
-            # Process image if provided
+            # If both image and document are provided, prioritize image
             if image:
-                logging.info("Processing image analysis")
-                image_analysis = analyze_image(image, self.api_key, self.model_version)
+                # Multimodal query with image
+                try:
+                    # Analyze image
+                    image_analysis = analyze_image(image, api_key=self.api_key, model_version=self.model_version)
+                    
+                    # Get response that incorporates both query and image analysis
+                    response_text = get_multimodal_response(query, image_analysis, api_key=self.api_key, model_version=self.model_version)
+                except Exception as e:
+                    response_text = f"Error processing image: {str(e)}"
             
-            # Retrieve relevant information if there's a vector store
-            if vector_store and (query or document_content):
-                logging.info("Searching vector store for relevant information")
-                text_to_embed = query
-                
-                # If there's document content, use that as additional context
-                if document_content:
-                    if len(document_content) > 1000:
-                        # For long documents, use the query to find relevant parts
-                        text_to_embed = query
+            elif document_content:
+                # Document query
+                try:
+                    # Create a summary of the document
+                    doc_summary = get_document_summary(document_content)
+                    
+                    # Prepare a context for RAG with the document content
+                    context = [{
+                        "content": f"Document Analysis: {doc_summary}\n\n{document_content[:5000]}"  # Limit to first 5000 chars
+                    }]
+                    
+                    # Get RAG-enhanced response
+                    response_text = get_rag_response(query, context, api_key=self.api_key, model_version=self.model_version)
+                except Exception as e:
+                    response_text = f"Error processing document query: {str(e)}"
+            
+            elif vector_store:
+                # RAG-enhanced query
+                try:
+                    # Get embedding for the query
+                    query_embedding = get_embedding(query, api_key=self.api_key, model_version=self.model_version)
+                    
+                    # Search vector store for relevant context
+                    search_results = search_vector_store(vector_store, query_embedding, k=3)
+                    
+                    if search_results:
+                        # Get RAG-enhanced response with context
+                        response_text = get_rag_response(query, search_results, api_key=self.api_key, model_version=self.model_version)
                     else:
-                        # For shorter documents, use the document content itself
-                        text_to_embed = document_content
-                        
-                # Generate embedding and search vector store
-                query_embedding = get_embedding(text_to_embed, self.api_key)
-                
-                if query_embedding:
-                    relevant_items = search_vector_store(vector_store, query_embedding)
-                    if relevant_items:
-                        relevant_information = "\n\n".join([item for item in relevant_items if item])
+                        # Fallback to regular response if no context found
+                        response_text = get_response(query, api_key=self.api_key, model_version=self.model_version)
+                except Exception as e:
+                    # Fallback to regular response on error
+                    print(f"Error in RAG query processing: {e}")
+                    response_text = get_response(query, api_key=self.api_key, model_version=self.model_version)
             
-            # Prepare the system prompt based on the available inputs
-            system_prompt = """You are a helpful AI assistant that provides accurate, relevant information. 
-            Be concise yet thorough in your answers."""
+            else:
+                # Regular text query
+                response_text = get_response(query, api_key=self.api_key, model_version=self.model_version)
             
-            # Add additional context based on inputs
-            message_parts = []
+            # Save assistant's response to DB
+            message_id = add_message_to_db(self.conversation_id, "assistant", response_text)
+            self.last_message_id = message_id
             
-            # If there's an image analysis, include it in the context
-            if image_analysis:
-                message_parts.append(f"Image Analysis:\n{image_analysis}")
-                system_prompt += "\nWhen responding to queries about images, refer specifically to visual details you observe."
-                
-            # If there's document content, include it in the context
-            if document_content:
-                # Only include a preview of long documents
-                doc_preview = document_content
-                if len(document_content) > 2000:
-                    doc_preview = document_content[:2000] + "... [document continues]"
-                
-                message_parts.append(f"Document Content:\n{doc_preview}")
-                system_prompt += "\nWhen responding to queries about documents, reference specific content from the document."
-                
-            # If there's relevant information from the vector store, include it
-            if relevant_information:
-                message_parts.append(f"Relevant Information:\n{relevant_information}")
-                system_prompt += "\nUtilize the relevant information provided when answering the query."
-                
-            # Construct the enhanced prompt with all the context
-            enhanced_prompt = query
-            if message_parts:
-                context = "\n\n".join(message_parts)
-                enhanced_prompt = f"{query}\n\nContext:\n{context}"
-                
-            # Get the AI response with the assembled context
-            response = get_response(
-                enhanced_prompt, 
-                system_prompt=system_prompt, 
-                api_key=self.api_key,
-                model_version=self.model_version
-            )
-            
-            # Add the response to the conversation history
-            self.add_to_history('assistant', response)
-            
-            return response
+            return response_text
             
         except Exception as e:
-            error_message = f"Error processing query: {str(e)}"
-            logging.error(error_message)
-            
-            # Add the error message to the conversation history
-            self.add_to_history('assistant', f"⚠️ {error_message}")
-            
-            return f"⚠️ {error_message}\n\nPlease try again or check your API key."
+            error_message = f"Error: {str(e)}"
+            # Save error message as assistant response
+            add_message_to_db(self.conversation_id, "assistant", error_message)
+            return error_message
