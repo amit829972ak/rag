@@ -128,7 +128,7 @@ with st.sidebar:
             help="Select which Gemini model version to use. The free tier model is Gemini 1.0 Pro."
         )
         
-        # Update the session state with the selection
+        # Check if model version has changed
         if selected_gemini_model != st.session_state.gemini_model_version:
             # Update the session state with the selection
             st.session_state.gemini_model_version = selected_gemini_model
@@ -136,7 +136,6 @@ with st.sidebar:
             # Reinitialize vector store with the new model version if API key is available
             if st.session_state.get("google_api_key"):
                 st.session_state.vector_store = initialize_vector_store(selected_gemini_model)
-
         
         # Initialize API key in session state if not already there
         if "google_api_key" not in st.session_state:
@@ -208,8 +207,7 @@ with st.sidebar:
             help="Select which OpenAI model version to use. The free tier model is GPT-3.5 Turbo."
         )
         
-        # Update the session state with the selection
-        # For OpenAI model switching
+        # Check if model version has changed
         if selected_openai_model != st.session_state.openai_model_version:
             # Update the session state with the selection
             st.session_state.openai_model_version = selected_openai_model
@@ -217,7 +215,7 @@ with st.sidebar:
             # Reinitialize vector store with the new model version if API key is available
             if st.session_state.get("openai_api_key"):
                 st.session_state.vector_store = initialize_vector_store(selected_openai_model)
-                
+        
         # Initialize OpenAI API key in session state if not already there
         if "openai_api_key" not in st.session_state:
             st.session_state.openai_api_key = ""
