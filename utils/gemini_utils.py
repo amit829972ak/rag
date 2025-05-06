@@ -5,28 +5,72 @@ from io import BytesIO
 import logging
 import google.generativeai as genai
 
-# Define model options with clear descriptions
+# Gemini model options with expanded set of models
 GEMINI_MODELS = {
     "gemini-1.0-pro": {
-        "name": "Gemini 1.0 Pro",
-        "description": "Free tier model good for text generation",
+        "name": "Gemini 1.0 Pro", 
+        "description": "Free tier capable model, good balance of capability and cost",
         "api_name": "gemini-pro"
     },
+    "gemini-1.0-pro-vision": {
+        "name": "Gemini 1.0 Pro Vision", 
+        "description": "Free tier model with image understanding",
+        "api_name": "gemini-pro-vision"
+    },
     "gemini-1.5-pro": {
-        "name": "Gemini 1.5 Pro",
-        "description": "Paid model with advanced capabilities",
+        "name": "Gemini 1.5 Pro", 
+        "description": "Advanced model with improved capabilities",
         "api_name": "gemini-1.5-pro"
     },
+    "gemini-1.5-pro-latest": {
+        "name": "Gemini 1.5 Pro (Latest)", 
+        "description": "Latest version with the most recent improvements",
+        "api_name": "gemini-1.5-pro-latest"
+    },
     "gemini-1.5-flash": {
-        "name": "Gemini 1.5 Flash",
-        "description": "Faster, more efficient paid model",
+        "name": "Gemini 1.5 Flash", 
+        "description": "Faster model, good for quick responses",
         "api_name": "gemini-1.5-flash"
+    },
+    "gemini-1.5-flash-latest": {
+        "name": "Gemini 1.5 Flash (Latest)", 
+        "description": "Latest version of the faster model",
+        "api_name": "gemini-1.5-flash-latest"
+    },
+    "gemini-2.0-pro": {
+        "name": "Gemini 2.0 Pro", 
+        "description": "Next-generation model with enhanced reasoning",
+        "api_name": "gemini-2.0-pro"
+    },
+    "gemini-2.0-pro-vision": {
+        "name": "Gemini 2.0 Pro Vision", 
+        "description": "Advanced vision capabilities with improved understanding",
+        "api_name": "gemini-2.0-pro-vision"
+    },
+    "gemini-2.5-pro": {
+        "name": "Gemini 2.5 Pro", 
+        "description": "Latest model with state-of-the-art capabilities",
+        "api_name": "gemini-2.5-pro"
+    },
+    "gemini-2.5-flash": {
+        "name": "Gemini 2.5 Flash", 
+        "description": "Fastest next-gen model for efficient responses",
+        "api_name": "gemini-2.5-flash"
     }
 }
-
 # Set the default model
 DEFAULT_TEXT_MODEL = "gemini-1.0-pro"
-DEFAULT_VISION_MODEL = "gemini-1.0-pro-vision"
+GEMINI_VISION_MODELS = [
+    "gemini-1.0-pro-vision", 
+    "gemini-1.5-pro", 
+    "gemini-1.5-flash", 
+    "gemini-1.5-pro-latest", 
+    "gemini-1.5-flash-latest",
+    "gemini-2.0-pro-vision",
+    "gemini-2.0-pro",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash"
+]
 
 def get_gemini_client(api_key=None):
     """
