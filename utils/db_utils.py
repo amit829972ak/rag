@@ -1,25 +1,54 @@
 import os
-import datetime
-import logging
 import json
+import datetime
+import base64
 import time
-import sqlalchemy
+import logging
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, LargeBinary, ForeignKey, Boolean, func
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.pool import NullPool
-from sqlalchemy import (
-    create_engine, Column, Integer, String, 
-    ForeignKey, DateTime, Text, LargeBinary
-)
+from sqlalchemy.orm import sessionmaker, relationship, scoped_session
+from sqlalchemy.pool import QueuePool
 
-# Configure logging
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Base class for SQLAlchemy models
+# Get database URL from environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Add a fallback to SQLite if no database URL is provided (e.g., for local development)
+if not DATABASE_URL:
+    logger.warning("No DATABASE_URL found. Using SQLite database instead.")
+    DATABASE_URL = "sqlite:///chatbot.db"
+
+# Create SQLAlchemy engine with connection pooling and retry logic
+if DATABASE_URL.startswith('sqlite'):
+    # SQLite doesn't support most of these connection options
+    engine = create_engine(DATABASE_URL)
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=1800,  # Recycle connections after 30 minutes
+        connect_args={
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5
+        }
+    )
+
+# Create scoped session for thread safety
+session_factory = sessionmaker(bind=engine)
+Session = scoped_session(session_factory)
+
+# Create base class for models
 Base = declarative_base()
 
-# Define models
 class User(Base):
     """User model to store user information."""
     __tablename__ = "users"
@@ -28,10 +57,12 @@ class User(Base):
     username = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
+    # Relationships
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(id={self.id}, username={self.username})>"
+
 
 class Conversation(Base):
     """Conversation model to group related messages."""
@@ -42,11 +73,13 @@ class Conversation(Base):
     title = Column(String(255), default="New Conversation")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
+    # Relationships
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
     
     def __repr__(self):
-        return f"<Conversation(id={self.id}, user_id={self.user_id}, title={self.title})>"
+        return f"<Conversation(id={self.id}, title={self.title})>"
+
 
 class Message(Base):
     """Message model to store chat messages."""
@@ -59,10 +92,12 @@ class Message(Base):
     image_data = Column(LargeBinary, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
     
+    # Relationships
     conversation = relationship("Conversation", back_populates="messages")
     
     def __repr__(self):
-        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, role={self.role})>"
+        return f"<Message(id={self.id}, role={self.role})>"
+
 
 class KnowledgeItem(Base):
     """Model for storing knowledge items with embeddings."""
@@ -77,122 +112,110 @@ class KnowledgeItem(Base):
     def __repr__(self):
         return f"<KnowledgeItem(id={self.id}, source={self.source})>"
 
-# Database connection singleton
-ENGINE = None
-SESSION = None
-
-def get_database_url():
-    """Get the database URL from environment variables or use SQLite as fallback."""
-    db_url = os.environ.get("DATABASE_URL")
-    
-    if db_url:
-        # Adapt the URL if it's a Postgres URL from Heroku
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://", 1)
-        return db_url
-    else:
-        # Use SQLite as a fallback
-        sqlite_path = "sqlite:///chatbot.db"
-        logger.warning(f"No DATABASE_URL found, using SQLite: {sqlite_path}")
-        return sqlite_path
 
 def initialize_database():
     """Create database tables if they don't exist with retry logic."""
-    global ENGINE, SESSION
+    max_retries = 5
+    retry_count = 0
+    backoff_factor = 1.5
     
-    # If already initialized, return
-    if ENGINE is not None and SESSION is not None:
-        return
-    
-    db_url = get_database_url()
-    
-    try:
-        # Create engine with appropriate connection settings
-        if db_url.startswith("postgresql"):
-            ENGINE = create_engine(
-                db_url,
-                echo=False,
-                pool_pre_ping=True,
-                connect_args={
-                    "connect_timeout": 10,
-                }
-            )
-        else:
-            # SQLite doesn't need pooling or similar settings
-            ENGINE = create_engine(db_url, echo=False)
-        
-        # Create a session maker
-        SESSION = sessionmaker(bind=ENGINE)
-        
-        # Create tables
-        Base.metadata.create_all(ENGINE)
-        logger.info("Database tables created successfully")
-        print("Database tables created successfully")
-        
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
-        print(f"Error initializing database: {str(e)}")
-        
-        # If using PostgreSQL, try SQLite as fallback
-        if db_url.startswith("postgresql"):
-            logger.warning("Falling back to SQLite database")
-            sqlite_path = "sqlite:///chatbot.db"
+    while retry_count < max_retries:
+        try:
+            # Test connection first
+            conn = engine.connect()
+            conn.close()
             
-            try:
-                ENGINE = create_engine(sqlite_path, echo=False)
-                SESSION = sessionmaker(bind=ENGINE)
-                Base.metadata.create_all(ENGINE)
-                logger.info("Created SQLite database as fallback")
-            except Exception as sqlite_e:
-                logger.error(f"Error creating SQLite fallback: {str(sqlite_e)}")
-                raise
+            # Create tables
+            Base.metadata.create_all(engine)
+            logger.info("Database tables created successfully")
+            print("Database tables created successfully")
+            return True
+        except Exception as e:
+            retry_count += 1
+            wait_time = backoff_factor ** retry_count
+            logger.error(f"Database connection error: {str(e)}. Retrying in {wait_time:.2f} seconds (Attempt {retry_count}/{max_retries})")
+            
+            if retry_count >= max_retries:
+                logger.error(f"Failed to initialize database after {max_retries} attempts: {str(e)}")
+                print(f"Failed to initialize database: {str(e)}")
+                return False
+            
+            time.sleep(wait_time)
+    
+    return False
+
 
 def execute_with_retry(func, *args, **kwargs):
     """Execute a database function with retry logic."""
     max_retries = 3
-    retry_delay = 1  # seconds
+    retry_count = 0
+    backoff_factor = 1.5
     
-    for attempt in range(max_retries):
+    while retry_count < max_retries:
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Database error: {str(e)}. Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                logger.error(f"Database operation failed after {max_retries} attempts: {str(e)}")
+            retry_count += 1
+            wait_time = backoff_factor ** retry_count
+            logger.error(f"Database operation error: {str(e)}. Retrying in {wait_time:.2f} seconds (Attempt {retry_count}/{max_retries})")
+            
+            if retry_count >= max_retries:
+                logger.error(f"Failed after {max_retries} attempts: {str(e)}")
                 raise
+            
+            time.sleep(wait_time)
 
 def get_or_create_user(username=None):
     """Get or create a user."""
     def _get_or_create_user():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
-            # Look for an existing user or create a new one
-            user = session.query(User).first()
-            if not user:
-                user = User(username=username)
-                session.add(user)
-                session.commit()
-            return user
+            if username:
+                user = session.query(User).filter(User.username == username).first()
+                if user:
+                    # Create a copy of user attributes before closing session
+                    user_id = user.id
+                    user_username = user.username
+                    user_created_at = user.created_at
+                    session.close()
+                    
+                    # Create a new User instance with copied attributes
+                    new_user = User(id=user_id, username=user_username, created_at=user_created_at)
+                    # Explicitly mark as detached
+                    new_user._sa_instance_state = None
+                    return new_user
+            
+            # Create a new user
+            user = User(username=username)
+            session.add(user)
+            session.commit()
+            
+            # Create a copy of user attributes before closing session
+            user_id = user.id
+            user_username = user.username
+            user_created_at = user.created_at
+            session.close()
+            
+            # Create a new User instance with copied attributes without relationships
+            new_user = User(id=user_id, username=user_username, created_at=user_created_at)
+            # Explicitly mark as detached
+            new_user._sa_instance_state = None
+            return new_user
+        except Exception as e:
+            session.rollback()
+            raise
         finally:
             session.close()
     
     return execute_with_retry(_get_or_create_user)
 
+
 def get_or_create_conversation(user_id, title=None):
     """Get or create a conversation for a user."""
     def _get_or_create_conversation():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
-            # Look for an existing conversation or create a new one
+            # Check if user has any conversations
             conversation = (
                 session.query(Conversation)
                 .filter(Conversation.user_id == user_id)
@@ -200,50 +223,78 @@ def get_or_create_conversation(user_id, title=None):
                 .first()
             )
             
-            if not conversation or title == "New Conversation":
+            if not conversation:
+                # Create a new conversation
                 conversation = Conversation(
                     user_id=user_id,
                     title=title or "New Conversation"
                 )
                 session.add(conversation)
                 session.commit()
+                conversation_id = conversation.id
                 
-            return conversation
+                # Get the newly created conversation to ensure it was created properly
+                conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
+            
+            # Create a copy of conversation attributes before closing session
+            conversation_id = conversation.id
+            conversation_user_id = conversation.user_id
+            conversation_title = conversation.title
+            conversation_created_at = conversation.created_at
+            
+            # Close the session
+            session.close()
+            
+            # Create a new Conversation instance with copied attributes
+            # Don't include relationships to avoid DetachedInstanceError
+            new_conversation = Conversation(
+                id=conversation_id,
+                user_id=conversation_user_id,
+                title=conversation_title,
+                created_at=conversation_created_at
+            )
+            
+            # Explicitly mark as detached
+            new_conversation._sa_instance_state = None
+            
+            return new_conversation
+        except Exception as e:
+            session.rollback()
+            raise
         finally:
             session.close()
     
     return execute_with_retry(_get_or_create_conversation)
 
+
 def add_message_to_db(conversation_id, role, content, image_data=None):
     """Add a message to the database."""
     def _add_message():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
             message = Message(
                 conversation_id=conversation_id,
                 role=role,
                 content=content,
-                image_data=image_data,
-                timestamp=datetime.datetime.utcnow()
+                image_data=image_data
             )
+            
             session.add(message)
             session.commit()
-            return message
+            return message.id
+        except Exception as e:
+            session.rollback()
+            raise
         finally:
             session.close()
     
     return execute_with_retry(_add_message)
 
+
 def get_conversation_messages(conversation_id, limit=100):
     """Get messages for a conversation."""
     def _get_messages():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
             messages = (
                 session.query(Message)
@@ -252,62 +303,85 @@ def get_conversation_messages(conversation_id, limit=100):
                 .limit(limit)
                 .all()
             )
-            return messages
+            
+            # Convert to a list of dictionaries and handle binary data
+            results = []
+            for msg in messages:
+                message_dict = {
+                    'id': msg.id,
+                    'role': msg.role,
+                    'content': msg.content,
+                    'timestamp': msg.timestamp.strftime("%H:%M")
+                }
+                
+                if msg.image_data:
+                    message_dict['image_data'] = msg.image_data
+                
+                results.append(message_dict)
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error getting conversation messages: {str(e)}")
+            raise
         finally:
             session.close()
     
     return execute_with_retry(_get_messages)
 
+
 def add_knowledge_item(content, embedding, source=None):
     """Add a knowledge item with embedding to the database."""
     def _add_knowledge_item():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
-            # Serialize the embedding to JSON
+            # JSON serialize the embedding
             embedding_json = json.dumps(embedding)
             
             item = KnowledgeItem(
                 content=content,
                 embedding=embedding_json,
-                source=source,
-                created_at=datetime.datetime.utcnow()
+                source=source
             )
+            
             session.add(item)
             session.commit()
-            return item
+            return item.id
+        except Exception as e:
+            session.rollback()
+            raise
         finally:
             session.close()
     
     return execute_with_retry(_add_knowledge_item)
 
+
 def get_all_knowledge_items():
     """Get all knowledge items with embeddings."""
     def _get_items():
-        if SESSION is None:
-            initialize_database()
-            
-        session = SESSION()
+        session = Session()
         try:
             items = session.query(KnowledgeItem).all()
             
-            # Parse the embeddings from JSON
-            result = []
+            # Convert to a list of dictionaries and parse embeddings
+            results = []
             for item in items:
                 try:
                     embedding = json.loads(item.embedding)
-                    result.append({
+                    results.append({
                         'id': item.id,
                         'content': item.content,
                         'embedding': embedding,
                         'source': item.source
                     })
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(f"Invalid embedding for item {item.id}, skipping")
-                    
-            return result
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error parsing embedding JSON for item {item.id}: {str(e)}")
+                    # Skip this item
+                    continue
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error getting knowledge items: {str(e)}")
+            raise
         finally:
             session.close()
     
