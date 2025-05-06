@@ -1,30 +1,33 @@
 import os
+import io
 import base64
 import json
-from io import BytesIO
-import logging
-import openai
+from openai import OpenAI
 
-# Define model options with clear descriptions
+# OpenAI model options
 OPENAI_MODELS = {
     "gpt-3.5-turbo": {
-        "name": "GPT-3.5 Turbo",
-        "description": "Affordable, fast model (free tier)",
-        "max_tokens": 2048
-    },
-    "gpt-4o": {
-        "name": "GPT-4o",
-        "description": "Latest and most capable model",
-        "max_tokens": 4096
+        "name": "GPT-3.5 Turbo", 
+        "description": "Free tier capable model, good balance of capability and cost",
+        "api_name": "gpt-3.5-turbo"
     },
     "gpt-4-turbo": {
-        "name": "GPT-4 Turbo",
-        "description": "Powerful model with good efficiency",
-        "max_tokens": 4096
+        "name": "GPT-4 Turbo", 
+        "description": "Cutting-edge reasoning, follows instructions better",
+        "api_name": "gpt-4-turbo"
+    },
+    "gpt-4o": {
+        "name": "GPT-4o", 
+        "description": "Latest model with improved speed and capabilities",
+        "api_name": "gpt-4o"
     }
 }
 
-# Set the default model
+# Models for specific capabilities
+VISION_MODELS = ["gpt-4-vision-preview", "gpt-4o"]
+EMBEDDING_MODEL = "text-embedding-ada-002"
+
+# Default model
 DEFAULT_MODEL = "gpt-3.5-turbo"
 
 def get_openai_client(api_key=None):
@@ -38,24 +41,16 @@ def get_openai_client(api_key=None):
     Returns:
         OpenAI: OpenAI client
     """
-    try:
-        # Check for API key in parameters or environment variables
-        api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        
-        if not api_key:
-            logging.warning("No OpenAI API key provided. Some features may not work.")
-            return None
-            
-        # Create a client with the provided API key
-        client = openai.OpenAI(api_key=api_key)
-        
-        # Test with a simple call to ensure the API key works
-        client.models.list(limit=1)
-        
-        return client
-    except Exception as e:
-        logging.error(f"Error creating OpenAI client: {str(e)}")
-        return None
+    # Require API key - no fallback to environment variable
+    if not api_key:
+        raise Exception("No API key provided. Please provide an OpenAI API key.")
+    
+    # Add basic format validation (OpenAI keys start with "sk-" and are ~50+ chars)
+    if not api_key.startswith("sk-") or len(api_key) < 20:
+        raise Exception("Invalid API key format. OpenAI API keys should start with 'sk-' and be at least 20 characters long.")
+    
+    # Just create the client without making test calls
+    return OpenAI(api_key=api_key)
 
 def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, model_version=None):
     """
@@ -66,7 +61,7 @@ def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, mode
         system_prompt (str, optional): System instructions to guide the AI.
         context (list, optional): Previous conversation context.
         api_key (str, optional): OpenAI API key.
-        model_version (str, optional): The specific model version to use.
+        model_version (str, optional): The specific OpenAI model to use.
         
     Returns:
         str: The AI's response.
@@ -74,48 +69,42 @@ def get_ai_response(prompt, system_prompt=None, context=None, api_key=None, mode
     Raises:
         Exception: If there's an API error (rate limit, authentication, etc.)
     """
+    messages = []
+    
+    # Add system message if provided
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    
+    # Add context messages if provided
+    if context:
+        messages.extend(context)
+    
+    # Add user prompt
+    messages.append({"role": "user", "content": prompt})
+    
+    # Use the specified model or the default
+    selected_model = model_version if model_version and model_version in OPENAI_MODELS else DEFAULT_MODEL
+    
+    # Get the API name for the selected model
+    model = OPENAI_MODELS[selected_model]["api_name"]
+    
     try:
-        # Get or create a client
         client = get_openai_client(api_key)
-        
-        if not client:
-            return "⚠️ Unable to generate a response: Missing or invalid OpenAI API key. Please provide a valid API key in the sidebar."
-        
-        # Get the appropriate model
-        if not model_version or model_version not in OPENAI_MODELS:
-            model_version = DEFAULT_MODEL
-        
-        # Prepare the messages for the conversation
-        messages = []
-        
-        # Add system prompt if provided
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-            
-        # Add conversation context if provided
-        if context:
-            for msg in context:
-                messages.append(msg)
-        
-        # Add the current user prompt
-        messages.append({"role": "user", "content": prompt})
-        
-        # Make the API call
         response = client.chat.completions.create(
-            model=model_version,
+            model=model,
             messages=messages,
             temperature=0.7,
-            max_tokens=OPENAI_MODELS[model_version]["max_tokens"],
-            top_p=0.95,
-            frequency_penalty=0,
-            presence_penalty=0
+            max_tokens=800
         )
-        
-        # Extract and return the response text
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Error calling OpenAI API: {str(e)}")
-        return f"⚠️ Unable to generate a response: {str(e)}\n\nPlease check your API key and try again."
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid OpenAI API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower() or "insufficient_quota" in error_msg:
+            raise Exception(f"OpenAI API quota or rate limit reached: {error_msg}")
+        else:
+            raise Exception(f"Error generating response: {error_msg}")
 
 def encode_image_to_base64(image):
     """
@@ -127,11 +116,9 @@ def encode_image_to_base64(image):
     Returns:
         str: Base64-encoded image string.
     """
-    buffer = BytesIO()
-    image.save(buffer, format="JPEG")
-    image_bytes = buffer.getvalue()
-    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-    return encoded_image
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def analyze_image_content(image, api_key=None, model_version=None):
     """
@@ -140,87 +127,73 @@ def analyze_image_content(image, api_key=None, model_version=None):
     Args:
         image (PIL.Image): The image to analyze.
         api_key (str, optional): OpenAI API key.
-        model_version (str, optional): The specific model version to use (not used for vision tasks).
+        model_version (str, optional): The specific OpenAI model to use.
         
     Returns:
         str: Analysis of the image content.
     """
+    base64_image = encode_image_to_base64(image)
+    
     try:
-        # Get or create a client
+        # Use a vision-capable model
+        # If the selected model supports vision, use it; otherwise use the default vision model
+        vision_model = "gpt-4o"  # Newest model with vision capabilities
+        
+        # If a specific model was requested and it's in our vision models list, use it
+        if model_version and model_version in VISION_MODELS:
+            # Get the API name for the selected model
+            vision_model = OPENAI_MODELS[model_version]["api_name"]
+            
         client = get_openai_client(api_key)
-        
-        if not client:
-            return "⚠️ Unable to analyze image: Missing or invalid OpenAI API key. Please provide a valid API key in the sidebar."
-        
-        # Encode the image to base64
-        base64_image = encode_image_to_base64(image)
-        
-        # Prepare the prompt for image analysis
-        prompt = """
-        Analyze this image and describe what you see in detail. 
-        Include:
-        1. Main subjects or objects
-        2. Actions or activities shown
-        3. Setting or background
-        4. Any text visible in the image
-        5. Notable details that might be relevant
-        
-        Provide a thorough and objective description without making assumptions beyond what is clearly visible.
-        """
-        
-        # Make the API call for vision analysis
         response = client.chat.completions.create(
-            model="gpt-4-vision-preview",  # Currently, the vision model is separate
+            model=vision_model,
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
-                        }
+                        {"type": "text", "text": "Analyze this image in detail. Describe what you see and provide any relevant information about the content."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
-            max_tokens=1000
+            max_tokens=500
         )
-        
-        # Extract and return the response text
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Error analyzing image with OpenAI: {str(e)}")
-        return f"⚠️ Unable to analyze image: {str(e)}\n\nPlease check your API key and try again."
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid OpenAI API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower() or "insufficient_quota" in error_msg:
+            raise Exception(f"OpenAI API quota or rate limit reached: {error_msg}")
+        elif "content" in error_msg.lower() and ("policy" in error_msg.lower() or "filter" in error_msg.lower()):
+            raise Exception("The image appears to contain content that violates OpenAI's content policy. Please try a different image.")
+        else:
+            raise Exception(f"Error analyzing image: {error_msg}")
 
-def get_embedding(text, api_key=None):
+def get_embedding(text, api_key=None, model_version=None):
     """
     Get an embedding vector for the given text.
     
     Args:
         text (str): The text to embed.
         api_key (str, optional): OpenAI API key.
+        model_version (str, optional): Not used for embeddings, but included for API consistency.
         
     Returns:
         list: The embedding vector.
     """
     try:
-        # Get or create a client
         client = get_openai_client(api_key)
-        
-        if not client:
-            logging.warning("Missing OpenAI API key for embedding generation.")
-            return None
-        
-        # Get the embedding from OpenAI
         response = client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
+            input=text,
+            model="text-embedding-ada-002"  # We use a specific embedding model regardless of model_version
         )
-        
-        # Return the embedding
         return response.data[0].embedding
     except Exception as e:
-        logging.error(f"Error generating embedding with OpenAI: {str(e)}")
-        return None
+        error_msg = str(e)
+        if "API key" in error_msg:
+            raise Exception("Invalid OpenAI API key. Please check your API key settings and try again.")
+        elif "quota" in error_msg.lower() or "rate" in error_msg.lower():
+            raise Exception(f"OpenAI API quota or rate limit reached: {error_msg}")
+        else:
+            raise Exception(f"Error generating embedding: {error_msg}")
