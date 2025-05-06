@@ -93,6 +93,37 @@ with st.sidebar:
     if selected_model == "gemini":
         st.subheader("🔑 Google Gemini API Key")
         
+        # Import model options from gemini_utils.py
+        from utils.gemini_utils import GEMINI_MODELS, DEFAULT_TEXT_MODEL
+        
+        # Model version selection dropdown for Gemini
+        st.subheader("🤖 Select Gemini Model Version")
+        
+        # Initialize model version in session state if not already there
+        if "gemini_model_version" not in st.session_state:
+            st.session_state.gemini_model_version = DEFAULT_TEXT_MODEL
+        
+        # Create a list of model options with formatted display names
+        gemini_model_options = []
+        model_descriptions = {}
+        
+        for model_id, model_info in GEMINI_MODELS.items():
+            display_name = f"{model_info['name']}"
+            gemini_model_options.append(model_id)
+            model_descriptions[model_id] = model_info['description']
+        
+        # Model selection dropdown
+        selected_gemini_model = st.selectbox(
+            "Choose Gemini model version:",
+            options=gemini_model_options,
+            format_func=lambda x: f"{GEMINI_MODELS[x]['name']} - {GEMINI_MODELS[x]['description']}",
+            index=gemini_model_options.index(st.session_state.gemini_model_version) if st.session_state.gemini_model_version in gemini_model_options else 0,
+            help="Select which Gemini model version to use. The free tier model is Gemini 1.0 Pro."
+        )
+        
+        # Update the session state with the selection
+        st.session_state.gemini_model_version = selected_gemini_model
+        
         # Initialize API key in session state if not already there
         if "google_api_key" not in st.session_state:
             st.session_state.google_api_key = ""
@@ -130,10 +161,41 @@ with st.sidebar:
             4. Create a new API key
             5. Copy and paste it into the field above
             
-            **Note:** Google Gemini API may have usage limits based on your plan. Check Google's documentation for more details.
+            **Note:** Google Gemini API has a free tier with Gemini 1.0 Pro. Check Google's documentation for more details.
             """)
     else:  # OpenAI model selected
         st.subheader("🔑 OpenAI API Key")
+        
+        # Import model options from openai_utils.py
+        from utils.openai_utils import OPENAI_MODELS, DEFAULT_MODEL
+        
+        # Model version selection dropdown for OpenAI
+        st.subheader("🤖 Select OpenAI Model Version")
+        
+        # Initialize model version in session state if not already there
+        if "openai_model_version" not in st.session_state:
+            st.session_state.openai_model_version = DEFAULT_MODEL
+        
+        # Create a list of model options with formatted display names
+        openai_model_options = []
+        model_descriptions = {}
+        
+        for model_id, model_info in OPENAI_MODELS.items():
+            display_name = f"{model_info['name']}"
+            openai_model_options.append(model_id)
+            model_descriptions[model_id] = model_info['description']
+        
+        # Model selection dropdown
+        selected_openai_model = st.selectbox(
+            "Choose OpenAI model version:",
+            options=openai_model_options,
+            format_func=lambda x: f"{OPENAI_MODELS[x]['name']} - {OPENAI_MODELS[x]['description']}",
+            index=openai_model_options.index(st.session_state.openai_model_version) if st.session_state.openai_model_version in openai_model_options else 0,
+            help="Select which OpenAI model version to use. The free tier model is GPT-3.5 Turbo."
+        )
+        
+        # Update the session state with the selection
+        st.session_state.openai_model_version = selected_openai_model
         
         # Initialize OpenAI API key in session state if not already there
         if "openai_api_key" not in st.session_state:
@@ -172,7 +234,7 @@ with st.sidebar:
             4. Create a new secret key
             5. Copy and paste it into the field above
             
-            **Note:** OpenAI has various pricing tiers based on the model you use. Check OpenAI's documentation for details.
+            **Note:** OpenAI offers a free tier with $5 credit for new users. GPT-3.5 Turbo is the most affordable model.
             """)
     
     st.header("Conversation")
@@ -269,135 +331,62 @@ with st.sidebar:
                 st.warning("Please try uploading a different document file.")
                 st.session_state.document_content = None
                 st.session_state.document_df = None
-    
-    # Initialize document-related session state if not exists
-    if "document_content" not in st.session_state:
-        st.session_state.document_content = None
-        
-    if "document_df" not in st.session_state:
-        st.session_state.document_df = None
-        
-    # Initialize image-related session state if not exists
-    if "image" not in st.session_state:
-        st.session_state.image = None
-        
-    if "image_bytes" not in st.session_state:
-        st.session_state.image_bytes = None
 
-# Define function to add message to chat
-def add_message(role, content, image_data=None):
-    """Add a message to the chat history."""
-    # Create message container
+# Update the agent with the selected model, model version, and API key
+if st.session_state.selected_model == "gemini":
+    st.session_state.agent.set_model(
+        "gemini", 
+        st.session_state.google_api_key, 
+        st.session_state.gemini_model_version if "gemini_model_version" in st.session_state else None
+    )
+else:
+    st.session_state.agent.set_model(
+        "openai", 
+        st.session_state.openai_api_key, 
+        st.session_state.openai_model_version if "openai_model_version" in st.session_state else None
+    )
+
+# Display messages from the conversation history
+message_history = st.session_state.agent.get_conversation_history()
+chat_history = st.session_state.agent.get_chatbot_format_history(message_history)
+
+# Display the chat messages using the Streamlit chat elements
+for role, content in chat_history:
     with st.chat_message(role):
-        # If image data exists and role is user, display the image
-        if image_data is not None and role == "user":
-            # Convert bytes to image and display
-            display_image = bytes_to_image(image_data)
-            if display_image:
-                st.image(display_image, caption="User uploaded image", width=300)
-        
-        # Display message content
         st.markdown(content)
 
-# Display chat messages from history
-try:
-    conversation_context = st.session_state.agent.get_conversation_context()
-    if conversation_context:
-        for message in conversation_context:
-            add_message(message["role"], message["content"])
-    else:
-        st.info("Start a new conversation by typing a message below.")
-except Exception as e:
-    st.error(f"Error loading conversation history: {str(e)}")
-    st.warning("You can start a new conversation by typing a message below.")
+# Chat input for questions - always enabled now (agent handles API key validation)
+query = st.chat_input("Ask a question...")
 
-# Chat input
-if prompt := st.chat_input("Type your message here..."):
-    # Handle user input
-    user_message = prompt
-    
-    # Add document information to the message if present
-    document_content = None
-    if st.session_state.document_content is not None:
-        document_summary = get_document_summary(st.session_state.document_content)
-        user_message += f"\n\n[Document attached: {document_summary}]"
-        document_content = st.session_state.document_content
-    
-    # Display the user message with image if present
-    add_message("user", user_message, st.session_state.image_bytes)
-    
-    # Analyze image if present
-    image_analysis = None
-    if st.session_state.image is not None:
-        with st.spinner("Analyzing image..."):
-            # Use the selected model for image analysis
-            if st.session_state.selected_model == "gemini":
-                image_analysis = gemini_analyze_image(
-                    st.session_state.image, 
-                    api_key=st.session_state.get('google_api_key')
-                )
-            else:  # OpenAI
-                image_analysis = openai_analyze_image(
-                    st.session_state.image, 
-                    api_key=st.session_state.get('openai_api_key')
-                )
-        # Clear the image after processing
-        st.session_state.image = None
-    
-    # Get relevant information if no image or document query
-    relevant_info = None
-    if not image_analysis and not document_content:
-        with st.spinner("Searching knowledge base..."):
-            # Use the selected model for generating embeddings
-            if st.session_state.selected_model == "gemini":
-                query_embedding = gemini_get_embedding(
-                    prompt, 
-                    api_key=st.session_state.get('google_api_key')
-                )
-            else:  # OpenAI
-                query_embedding = openai_get_embedding(
-                    prompt, 
-                    api_key=st.session_state.get('openai_api_key')
-                )
-            relevant_info = search_vector_store(st.session_state.vector_store, query_embedding)
-    
-    # Get AI response
-    try:
-        with st.spinner("Thinking..."):
-            # Use the appropriate API key based on selected model
-            if st.session_state.selected_model == "gemini":
-                api_key = st.session_state.get('google_api_key')
-                model_name = "gemini"
-            else:
-                api_key = st.session_state.get('openai_api_key')
-                model_name = "openai"
-                
-            response = st.session_state.agent.process_query(
-                query=prompt,
-                image_analysis=image_analysis,
-                document_content=document_content,
-                relevant_info=relevant_info,
-                api_key=api_key,
-                model_name=model_name
-            )
-            
-            # Clear document content after processing
-            st.session_state.document_content = None
-            st.session_state.document_df = None
-    except Exception as e:
-        error_msg = str(e)
-        selected_model = st.session_state.selected_model
-        provider_name = "Google Gemini" if selected_model == "gemini" else "OpenAI"
+# If a query is submitted, process it
+if query:
+    # Display the user's message
+    with st.chat_message("user"):
+        st.markdown(query)
         
-        if "429" in error_msg or "rate limit" in error_msg.lower() or "quota" in error_msg.lower():
-            response = f"⚠️ {provider_name} API quota or rate limit reached. Please try again later or provide a different API key in the sidebar."
-            st.error(f"{provider_name} API quota or rate limit reached. Please check your API key or try again later.")
-        elif "API key" in error_msg:
-            response = f"⚠️ Invalid {provider_name} API key. Please provide a valid API key in the sidebar."
-            st.error(f"{provider_name} API key error. Please check your API key and try again.")
-        else:
-            response = f"⚠️ An error occurred: {error_msg}. Please try again or check your inputs."
-            st.error(f"Error: {error_msg}")
+    # Display a spinner while processing the response
+    with st.spinner("Thinking..."):
+        # Process the query through the agent
+        response = st.session_state.agent.process_query(
+            query=query, 
+            vector_store=st.session_state.vector_store,
+            image=st.session_state.image if "image" in st.session_state and st.session_state.image else None,
+            document_content=st.session_state.document_content if "document_content" in st.session_state and st.session_state.document_content else None
+        )
     
-    # Display assistant response
-    add_message("assistant", response)
+    # Display the assistant's response
+    with st.chat_message("assistant"):
+        st.markdown(response)
+
+# Footer with app information
+st.markdown("---")
+st.markdown("**Multimodal RAG Chatbot** | A demonstration of retrieval-augmented generation with multimodal capabilities")
+
+# Key capability indicators at the bottom
+capability_col1, capability_col2, capability_col3 = st.columns(3)
+with capability_col1:
+    st.info("💬 Text Processing", icon="💬")
+with capability_col2:
+    st.info("🖼️ Image Analysis", icon="🖼️")
+with capability_col3:
+    st.info("📄 Document Processing", icon="📄")
